@@ -282,8 +282,8 @@
             <div class="ctrl">
                 <label for="pRange">Number of vertiports (2–200)</label>
                 <div class="row">
-                    <input id="pRange" type="range" min="2" max="200" step="1" value="12">
-                    <div class="value" id="pVal">12</div>
+                    <input id="pRange" type="range" min="2" max="200" step="1" value="4">
+                    <div class="value" id="pVal">4</div>
                 </div>
             </div>
 
@@ -292,6 +292,13 @@
                 <div class="row">
                     <input id="alphaRange" type="range" min="0" max="1" step="0.01" value="0.50">
                     <div class="value" id="alphaVal">0.50</div>
+                </div>
+            </div>
+            <div class="ctrl">
+                <label for="distRange">Neighbor distance (0–5 km)</label>
+                <div class="row">
+                    <input id="distRange" type="range" min="0" max="5" step="0.1" value="1.0">
+                    <div class="value" id="distVal">1.0 km</div>
                 </div>
             </div>
 
@@ -364,6 +371,13 @@
             pRange.addEventListener('input', () => pVal.textContent = pRange.value);
             alphaRange.addEventListener('input', () => alphaVal.textContent = (+alphaRange.value).toFixed(2));
 
+            const distRange = document.getElementById('distRange');
+            const distVal = document.getElementById('distVal');
+
+            distRange.addEventListener('input', () =>
+                distVal.textContent = distRange.value + " km"
+            );
+
             // --------------------------
             // Load data
             // --------------------------
@@ -402,15 +416,20 @@
                 for (const r of demandRows) {
                     const o = String(r.origin_tract).padStart(7, '0');
                     const d = String(r.destination_tract).padStart(7, '0');
+
+                    //if(o == "1010900" && d == "1008400") {console.log(r);}
                     const ud = +r.universal_demand || 0;
 
                     const eo = equity.get(o) ?? equityMean;
                     const ed = equity.get(d) ?? equityMean;
                     const factor = (1 - alpha) + alpha * ((eo + ed) / 2);
 
+                    const ds = r.distance_km;
+
                     const w = ud * factor;
-                    if (w > 0) {
-                        adj.push({ o, d, w, eo, ed });
+                    //do not remove pairs with w > 0 because it messes up the distance calculations and speed gians appear to be negligible.
+                    if (1) { //w > 0) {
+                        adj.push({ o, d, w, eo, ed, ds});
                         total += w;
                     }
                 }
@@ -484,6 +503,75 @@
                 return { selected, disabled, capturedPct, avgEq };
             }
 
+            function greedyPlace2(p, adj, incidentMap, distanceThreshold = 5) {
+                const selected = [];
+                const disabled = new Set();
+                const candidates = new Set([...incidentMap.keys()].filter(id => featById.has(id)));
+
+                // compute neighbors only for a single tract
+                function getNeighbors(id) {
+                    id = String(id).padStart(7, "0");
+                    const out = new Set();
+                    for (const r of adj) {
+                        const o = String(r.o).padStart(7, "0");
+                        const d = String(r.d).padStart(7, "0");
+                        const dist = parseFloat(r.ds);
+                        //if(o=="1010900" && d == "1008400" && o == id) {console.log(dist);}
+                        
+                        if (!Number.isFinite(dist)) continue;
+                        if (dist < distanceThreshold) {
+                            if (o === id) out.add(d);
+                            else if (d === id) out.add(o);
+                        }
+                    }
+
+                    //console.log(out);
+                    return [...out];
+                }
+
+                function eliminate(id) {
+                    disabled.add(id);
+                    candidates.delete(id);
+
+                    const ns = getNeighbors(id);
+                    for (const n of ns) {
+                        disabled.add(n);
+                        candidates.delete(n);
+                    }
+                }
+
+                while (selected.length < p) {
+                    if (!candidates.size) break;
+
+                    let bestId = null;
+                    let bestScore = -Infinity;
+
+                    for (const id of candidates) {
+                        if (disabled.has(id)) continue;
+                        const s = incidentMap.get(id) || 0;
+                        if (s > bestScore) {
+                            bestScore = s;
+                            bestId = id;
+                        }
+                    }
+
+                    if (!bestId || bestScore <= 0) break;
+
+                    selected.push({ id: bestId, score: bestScore });
+                    eliminate(bestId);
+                }
+
+                const captured = d3.sum(selected, d => incidentMap.get(d.id) || 0);
+                const totalIncident = d3.sum(incidentMap.values());
+                const capturedPct = totalIncident > 0 ? captured / totalIncident : 0;
+
+                const avgEq = selected.length
+                    ? d3.mean(selected, d => equity.get(d.id) ?? equityMean)
+                    : null;
+
+                return { selected, disabled, capturedPct, avgEq };
+            }
+
             // --------------------------
             // Map setup
             // --------------------------
@@ -527,6 +615,8 @@
             async function run() {
                 const P = +pRange.value;
                 const alpha = +alphaRange.value;
+                const distThresh = +distRange.value;
+
 
                 // 1) Equity-adjusted weights
                 const { adj, total } = computeAdjustedWeights(alpha);
@@ -535,7 +625,7 @@
                 const incident = aggregateIncident(adj);
 
                 // 3) Greedy place + neighbor elimination
-                const { selected, disabled, capturedPct, avgEq } = greedyPlace(P, adj, incident, neighbors);
+                const { selected, disabled, capturedPct, avgEq } = greedyPlace2(P, adj, incident, distThresh);//neighbors);
 
                 // 4) Paint
                 const selectedIds = new Set(selected.map(d => d.id));
