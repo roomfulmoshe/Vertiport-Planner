@@ -699,7 +699,7 @@
 
             // Also run on P/alpha slider change (debounced), same as before
             let debounce;
-            [pRange, alphaRange].forEach(el => el.addEventListener('input', () => {
+            [pRange, alphaRange, distRange].forEach(el => el.addEventListener('input', () => {
                 clearTimeout(debounce);
                 debounce = setTimeout(run, 180);
             }));
