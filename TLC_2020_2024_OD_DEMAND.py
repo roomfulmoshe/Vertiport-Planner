@@ -327,7 +327,7 @@ plt.title(f'Top {TOP_N} Busiest O-D Routes by Census Tract (2020-2024)', fontsiz
 plt.xlabel('Total Apportioned Trips (5-Year Total)', fontsize=12)
 plt.ylabel('Origin → Destination Tract', fontsize=12)
 plt.tight_layout()
-plt.show()
+plt.savefig("images/top_OD_routes_TLC_2020_2024.png")
 
 print("\n--- Top 10 Routes ---")
 print(df_top_routes.sort_values(by='total_trips', ascending=False)[['route', 'total_trips']].head(10))

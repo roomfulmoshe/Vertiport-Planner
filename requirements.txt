@@ -4,3 +4,4 @@ seaborn
 notebook
 pyarrow
 tqdm
+notebook

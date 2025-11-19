@@ -352,7 +352,7 @@
             const TRACTS_GEOJSON = "nyc_tracts/nyc_tracts.json";
             const DEMAND_CSV = "output/Universal_Demand_Map.csv";
             const ACS_CSV = "output/ACS_cleaned_equity.csv";
-            const NEIGHBORS_JSON = "output/nyc_tract_neighbors_1mile.json";
+            const NEIGHBORS_JSON = "output/nyc_tract_neighbors_1mile.json"; // still loaded, even if not used heavily
 
             // --------------------------
             // UI Elements
@@ -368,20 +368,24 @@
             const kpiCovered = document.getElementById('kpiCovered');
             const kpiEquity = document.getElementById('kpiEquity');
 
-            pRange.addEventListener('input', () => pVal.textContent = pRange.value);
-            alphaRange.addEventListener('input', () => alphaVal.textContent = (+alphaRange.value).toFixed(2));
-
             const distRange = document.getElementById('distRange');
             const distVal = document.getElementById('distVal');
 
+            pRange.addEventListener('input', () => pVal.textContent = pRange.value);
+            alphaRange.addEventListener('input', () => alphaVal.textContent = (+alphaRange.value).toFixed(2));
             distRange.addEventListener('input', () =>
                 distVal.textContent = distRange.value + " km"
             );
 
+            // Helper: normalize tract ID to 7 digits
+            function pad7(x) {
+                return String(x).padStart(7, '0');
+            }
+
             // --------------------------
             // Load data
             // --------------------------
-            const [geo, demandRows, acsRows, neighbors] = await Promise.all([
+            const [geo, demandRows, acsRows, neighborsJson] = await Promise.all([
                 d3.json(TRACTS_GEOJSON),
                 d3.csv(DEMAND_CSV, d3.autoType),
                 d3.csv(ACS_CSV, d3.autoType),
@@ -389,7 +393,7 @@
             ]);
 
             // Map of equity weights by 7-digit tract id
-            const equity = new Map(acsRows.map(d => [String(d.tract_id).padStart(7, '0'), +d.equity_weight]));
+            const equity = new Map(acsRows.map(d => [pad7(d.tract_id), +d.equity_weight]));
             // If missing, default to mean
             const equityMean = d3.mean([...equity.values()]);
 
@@ -397,14 +401,48 @@
             const features = geo.features.map(f => {
                 // Prefer BoroCT2020 (7-digit). Fallback to TRACTCE or GEOID trimming.
                 let id = f.properties.BoroCT2020;
-                if (!id && f.properties.TRACTCE) id = String(f.properties.TRACTCE).padStart(7, '0');
+                if (!id && f.properties.TRACTCE) id = pad7(f.properties.TRACTCE);
                 if (!id && f.properties.GEOID) id = String(f.properties.GEOID).slice(-7);
-                f.properties._TRACT7 = String(id).padStart(7, '0');
+                f.properties._TRACT7 = pad7(id);
                 return f;
             });
 
             // Build a quick lookup for feature by tract id
             const featById = new Map(features.map(f => [f.properties._TRACT7, f]));
+
+            // --------------------------
+            // PRECOMPUTE NEIGHBORS BY DISTANCE (from demandRows.distance_km)
+            // For each pair (o,d), we store the MIN distance between them.
+            // neighborsByDist: Map<tractId, Array<{ id, dist }>>
+            // --------------------------
+            const neighborMap = new Map(); // Map<id, Map<neighborId, minDist>>
+
+            for (const r of demandRows) {
+                const o = pad7(r.origin_tract);
+                const d = pad7(r.destination_tract);
+                const dist = +r.distance_km;
+
+                if (!Number.isFinite(dist)) continue;
+
+                if (!neighborMap.has(o)) neighborMap.set(o, new Map());
+                if (!neighborMap.has(d)) neighborMap.set(d, new Map());
+
+                const mO = neighborMap.get(o);
+                const prevOD = mO.get(d);
+                if (prevOD === undefined || dist < prevOD) mO.set(d, dist);
+
+                const mD = neighborMap.get(d);
+                const prevDO = mD.get(o);
+                if (prevDO === undefined || dist < prevDO) mD.set(o, dist);
+            }
+
+            const neighborsByDist = new Map();
+            for (const [id, m] of neighborMap.entries()) {
+                neighborsByDist.set(
+                    id,
+                    [...m.entries()].map(([nid, dist]) => ({ id: nid, dist }))
+                );
+            }
 
             // --------------------------
             // Precompute equity-adjusted OD weights function
@@ -414,24 +452,21 @@
                 const adj = [];
                 let total = 0;
                 for (const r of demandRows) {
-                    const o = String(r.origin_tract).padStart(7, '0');
-                    const d = String(r.destination_tract).padStart(7, '0');
+                    const o = pad7(r.origin_tract);
+                    const d = pad7(r.destination_tract);
 
-                    //if(o == "1010900" && d == "1008400") {console.log(r);}
                     const ud = +r.universal_demand || 0;
 
                     const eo = equity.get(o) ?? equityMean;
                     const ed = equity.get(d) ?? equityMean;
                     const factor = (1 - alpha) + alpha * ((eo + ed) / 2);
 
-                    const ds = r.distance_km;
+                    const ds = +r.distance_km;
 
                     const w = ud * factor;
-                    //do not remove pairs with w > 0 because it messes up the distance calculations and speed gians appear to be negligible.
-                    if (1) { //w > 0) {
-                        adj.push({ o, d, w, eo, ed, ds});
-                        total += w;
-                    }
+                    // Keep all pairs (including zero weight) for consistent adjacency / distances
+                    adj.push({ o, d, w, eo, ed, ds });
+                    total += w;
                 }
                 return { adj, total };
             }
@@ -449,7 +484,7 @@
             }
 
             // --------------------------
-            // Greedy placement:
+            // Greedy placement (original behavior)
             // - While |selected| < p:
             //   - score each candidate by incident weight
             //   - pick best
@@ -460,7 +495,12 @@
                 const disabled = new Set(); // neighbors + selected
                 const candidates = new Set([...incidentMap.keys()].filter(id => featById.has(id)));
 
-                const neigh = new Map(Object.entries(neighbors).map(([k, arr]) => [String(k).padStart(7, '0'), arr.map(x => String(x).padStart(7, '0'))]));
+                const neigh = new Map(
+                    Object.entries(neighbors).map(([k, arr]) => [
+                        pad7(k),
+                        arr.map(x => pad7(x))
+                    ])
+                );
 
                 // Helper: eliminate a tract and its neighbors
                 function eliminate(id) {
@@ -503,30 +543,27 @@
                 return { selected, disabled, capturedPct, avgEq };
             }
 
+            // --------------------------
+            // Optimized Greedy placement with distance-based neighbors:
+            // Same greedy logic, but neighbors come from precomputed neighborsByDist + distance threshold.
+            // --------------------------
             function greedyPlace2(p, adj, incidentMap, distanceThreshold = 5) {
                 const selected = [];
                 const disabled = new Set();
                 const candidates = new Set([...incidentMap.keys()].filter(id => featById.has(id)));
 
-                // compute neighbors only for a single tract
+                // Fast neighbor lookup using precomputed neighborsByDist and distance_km
                 function getNeighbors(id) {
-                    id = String(id).padStart(7, "0");
-                    const out = new Set();
-                    for (const r of adj) {
-                        const o = String(r.o).padStart(7, "0");
-                        const d = String(r.d).padStart(7, "0");
-                        const dist = parseFloat(r.ds);
-                        //if(o=="1010900" && d == "1008400" && o == id) {console.log(dist);}
-                        
-                        if (!Number.isFinite(dist)) continue;
-                        if (dist < distanceThreshold) {
-                            if (o === id) out.add(d);
-                            else if (d === id) out.add(o);
+                    id = pad7(id);
+                    const list = neighborsByDist.get(id) || [];
+                    const out = [];
+                    for (const n of list) {
+                        if (!Number.isFinite(n.dist)) continue;
+                        if (n.dist < distanceThreshold) {
+                            out.push(n.id);
                         }
                     }
-
-                    //console.log(out);
-                    return [...out];
+                    return out;
                 }
 
                 function eliminate(id) {
@@ -573,7 +610,7 @@
             }
 
             // --------------------------
-            // Map setup
+            // Map setup (FLIPPED VERTICALLY)
             // --------------------------
             const mapEl = d3.select("#map");
             const tooltip = d3.select("#tooltip");
@@ -581,11 +618,15 @@
             const width = mapEl.node().clientWidth || 900;
             const height = Math.max(720, Math.round(width * 0.9));
 
-            const svg = mapEl.append("svg").attr("viewBox", [0, 0, width, height]).attr("width", "100%").attr("height", "100%");
+            const svg = mapEl.append("svg")
+                .attr("viewBox", [0, 0, width, height])
+                .attr("width", "100%")
+                .attr("height", "100%");
+
             const g = svg.append("g");
 
-            // Fit projection to NYC tracts
-            const projection = d3.geoIdentity();
+            // Fit projection to NYC tracts, but FLIP vertically so map looks "normal"
+            const projection = d3.geoIdentity().reflectY(true);
             const path = d3.geoPath(projection);
             projection.fitExtent([[10, 10], [width - 10, height - 10]], { type: "FeatureCollection", features });
 
@@ -617,15 +658,14 @@
                 const alpha = +alphaRange.value;
                 const distThresh = +distRange.value;
 
-
                 // 1) Equity-adjusted weights
                 const { adj, total } = computeAdjustedWeights(alpha);
 
                 // 2) Aggregate per-tract incident weight
                 const incident = aggregateIncident(adj);
 
-                // 3) Greedy place + neighbor elimination
-                const { selected, disabled, capturedPct, avgEq } = greedyPlace2(P, adj, incident, distThresh);//neighbors);
+                // 3) Greedy place + neighbor elimination with distance threshold
+                const { selected, disabled, capturedPct, avgEq } = greedyPlace2(P, adj, incident, distThresh);
 
                 // 4) Paint
                 const selectedIds = new Set(selected.map(d => d.id));
@@ -656,7 +696,8 @@
             }
 
             runBtn.addEventListener('click', run);
-            // Also run on slider change (debounced)
+
+            // Also run on P/alpha slider change (debounced), same as before
             let debounce;
             [pRange, alphaRange].forEach(el => el.addEventListener('input', () => {
                 clearTimeout(debounce);
@@ -666,12 +707,14 @@
             // Initial values UI
             pVal.textContent = pRange.value;
             alphaVal.textContent = (+alphaRange.value).toFixed(2);
+            distVal.textContent = distRange.value + " km";
 
             // First render
             run();
 
         })();
     </script>
+
 </body>
 
 </html>
