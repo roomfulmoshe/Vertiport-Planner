@@ -263,6 +263,41 @@
             stroke-dasharray: 3 3;
             opacity: .8;
         }
+
+        .loading-overlay {
+            position: absolute;
+            inset: 0;
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            background: rgba(8, 16, 34, 0.85);
+            backdrop-filter: blur(4px);
+            z-index: 20;
+        }
+
+        /* eVTOL spinner graphic */
+        .evtol-hover {
+            width: 300px;
+            height: auto;
+            animation: hover 2.4s ease-in-out infinite,
+                    vibrate 0.12s ease-in-out infinite; /* optional jitter */
+            opacity: 0.98;
+            filter: drop-shadow(0 12px 22px rgba(124, 58, 232, 0.25));
+        }
+        @keyframes hover {
+            0%   { transform: translateY(0px);   }
+            50%  { transform: translateY(-40px); }
+            100% { transform: translateY(0px);   }
+        }
+
+        .loading-text {
+            color: #93a4bf;
+            font-size: 25px;
+            letter-spacing: 0.5px;
+        }
+
     </style>
 </head>
 
@@ -339,12 +374,28 @@
             <div id="map"></div>
             <div id="tooltip" class="tooltip" style="opacity:0;"></div>
         </div>
+
+        <!-- loading symbol -->
+        <div class="loading-overlay" id="loadingOverlay">
+            <img src="images/evtol.png" class="evtol-hover">
+            <div class="loading-text">Loading…</div>
+        </div>
     </div>
 
     <div class="footer">Built with D3 v7. Data: Universal Demand Map, ACS Equity, tract neighbors. Template styling
         inspired by your tract viewer. </div>
 
     <script>
+        //loading spinning evtol code
+        const loadingOverlay = document.getElementById("loadingOverlay");
+        function showLoading(msg = "Loading…") {
+            loadingOverlay.style.display = "flex";
+            loadingOverlay.querySelector(".loading-text").textContent = msg;
+        }
+        function hideLoading() {
+            loadingOverlay.style.display = "none";
+        }
+
         (async function () {
             // --------------------------
             // File paths (relative)
@@ -385,12 +436,16 @@
             // --------------------------
             // Load data
             // --------------------------
+            showLoading("loading map and data…"); 
             const [geo, demandRows, acsRows, neighborsJson] = await Promise.all([
                 d3.json(TRACTS_GEOJSON),
                 d3.csv(DEMAND_CSV, d3.autoType),
                 d3.csv(ACS_CSV, d3.autoType),
                 d3.json(NEIGHBORS_JSON)
             ]);
+
+            // Max universal demand for normalization
+            const udMax = d3.max(demandRows, d => +d.universal_demand || 0);
 
             // Map of equity weights by 7-digit tract id
             const equity = new Map(acsRows.map(d => [pad7(d.tract_id), +d.equity_weight]));
@@ -451,23 +506,27 @@
             function computeAdjustedWeights(alpha) {
                 const adj = [];
                 let total = 0;
+
                 for (const r of demandRows) {
                     const o = pad7(r.origin_tract);
                     const d = pad7(r.destination_tract);
 
-                    const ud = +r.universal_demand || 0;
+                    const udRaw = +r.universal_demand || 0;
+                    const udNorm = udMax > 0 ? udRaw / udMax : 0;   // 0–1
 
                     const eo = equity.get(o) ?? equityMean;
                     const ed = equity.get(d) ?? equityMean;
-                    const factor = (1 - alpha) + alpha * ((eo + ed) / 2);
+                    const eq = (eo + ed) / 2;                        // ~0–1
+
+                    // convex combination: alpha=0 → pure demand, alpha=1 → pure equity
+                    const w = (1 - alpha) * udNorm + alpha * eq;
 
                     const ds = +r.distance_km;
 
-                    const w = ud * factor;
-                    // Keep all pairs (including zero weight) for consistent adjacency / distances
-                    adj.push({ o, d, w, eo, ed, ds });
+                    adj.push({ o, d, w, eo, ed, ds, udRaw });
                     total += w;
                 }
+
                 return { adj, total };
             }
 
@@ -616,7 +675,7 @@
             const tooltip = d3.select("#tooltip");
 
             const width = mapEl.node().clientWidth || 900;
-            const height = Math.max(720, Math.round(width * 0.9));
+            const height = Math.max(680, Math.round(width * 0.65));
 
             const svg = mapEl.append("svg")
                 .attr("viewBox", [0, 0, width, height])
@@ -649,6 +708,8 @@
 
             // Zoom / pan
             svg.call(d3.zoom().scaleExtent([1, 30]).on("zoom", ({ transform }) => g.attr("transform", transform)));
+
+            hideLoading();
 
             // --------------------------
             // Run pipeline (compute, place, paint)
@@ -694,15 +755,22 @@
                 kpiCovered.textContent = (capturedPct * 100).toFixed(1) + "%";
                 kpiEquity.textContent = (avgEq ?? 0).toFixed(3);
             }
+            async function triggerRun(label = "Running greedy placement…") {
+                showLoading(label);
+                runBtn.disabled = true;
 
-            runBtn.addEventListener('click', run);
+                // give the browser a tick to paint the overlay
+                await new Promise(resolve => setTimeout(resolve, 0));
 
-            // Also run on P/alpha slider change (debounced), same as before
-            let debounce;
-            [pRange, alphaRange, distRange].forEach(el => el.addEventListener('input', () => {
-                clearTimeout(debounce);
-                debounce = setTimeout(run, 180);
-            }));
+                try {
+                    await run();
+                } finally {
+                    runBtn.disabled = false;
+                    hideLoading();
+                }
+            }
+
+            runBtn.addEventListener('click', () => triggerRun("Running greedy placement…"));
 
             // Initial values UI
             pVal.textContent = pRange.value;
@@ -710,7 +778,7 @@
             distVal.textContent = distRange.value + " km";
 
             // First render
-            run();
+            await run(true);
 
         })();
     </script>
