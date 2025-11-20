@@ -444,6 +444,9 @@
                 d3.json(NEIGHBORS_JSON)
             ]);
 
+            // Max universal demand for normalization
+            const udMax = d3.max(demandRows, d => +d.universal_demand || 0);
+
             // Map of equity weights by 7-digit tract id
             const equity = new Map(acsRows.map(d => [pad7(d.tract_id), +d.equity_weight]));
             // If missing, default to mean
@@ -503,23 +506,27 @@
             function computeAdjustedWeights(alpha) {
                 const adj = [];
                 let total = 0;
+
                 for (const r of demandRows) {
                     const o = pad7(r.origin_tract);
                     const d = pad7(r.destination_tract);
 
-                    const ud = +r.universal_demand || 0;
+                    const udRaw = +r.universal_demand || 0;
+                    const udNorm = udMax > 0 ? udRaw / udMax : 0;   // 0–1
 
                     const eo = equity.get(o) ?? equityMean;
                     const ed = equity.get(d) ?? equityMean;
-                    const factor = (1 - alpha) + alpha * ((eo + ed) / 2);
+                    const eq = (eo + ed) / 2;                        // ~0–1
+
+                    // convex combination: alpha=0 → pure demand, alpha=1 → pure equity
+                    const w = (1 - alpha) * udNorm + alpha * eq;
 
                     const ds = +r.distance_km;
 
-                    const w = ud * factor;
-                    // Keep all pairs (including zero weight) for consistent adjacency / distances
-                    adj.push({ o, d, w, eo, ed, ds });
+                    adj.push({ o, d, w, eo, ed, ds, udRaw });
                     total += w;
                 }
+
                 return { adj, total };
             }
 
