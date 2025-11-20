@@ -33,7 +33,7 @@ Complete Setup from Scratch
 Follow these steps exactly to set up and run the entire pipeline from a
 clean system.
 
-Step 1: Clone the Repository
+Step 1: Clone the Repository (optional if not downloaded)
 
     git clone https://github.com/roomfulmoshe/Vertiport-Planner.git
     cd Vertiport-Planner
@@ -52,12 +52,12 @@ On Windows:
 
 Step 3: Install ALL Required Packages
 
+    This project uses python 3.11
     # Upgrade pip first
     pip install --upgrade pip
 
     # Install all dependencies including notebook
     pip install -r requirements.txt
-    pip install jupyter notebook
 
     # Verify installation
     python -c "import geopandas, pandas, numpy; print('✓ All packages installed successfully')"
@@ -165,8 +165,7 @@ Using Python HTTP Server:
 
     python -m http.server 8000
 
-Then open in browser: - http://localhost:8000/visualize_greedy.html -
-http://localhost:8000/zones_tracts.html
+Then open in browser: - http://localhost:8000/visualize_greedy.html
 
 Using VS Code Live Server: 1. Install “Live Server” extension 2.
 Right-click HTML file → “Open with Live Server”
@@ -192,7 +191,7 @@ Output Files
 
   nyc_census_tract_demographics.csv   52KB              Demographics
 
-  OD_demand_TLC.csv                   ~500MB            Taxi demand (if Stage 3 run)
+  OD_demand_TLC_nonneighbors.csv                   ~500MB            Taxi demand (if Stage 3 run)
 
   OD_demand_universal.csv             ~500MB            Combined demand (if Stage 5 run)
   ------------------------------------------------------------------------------------------
